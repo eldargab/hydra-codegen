@@ -1,0 +1,11 @@
+{
+  "name": "codegen",
+  "private": true,
+  "dependencies": {
+    "@subsquid/openreader": "/Users/eldar/dev/apollo/subsquid-openreader-0.4.0.tgz"
+  },
+  "devDependencies": {
+    "@types/node": "^16.10.2",
+    "typescript": "^4.4.3"
+  }
+}
