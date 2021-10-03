@@ -1,4 +1,4 @@
-import type {Entity, Model, Prop, JsonObject} from "@subsquid/openreader/dist/model"
+import type {Entity, Model, Prop, JsonObject, Union, Enum} from "@subsquid/openreader/dist/model"
 import {loadModel} from "@subsquid/openreader/dist/tools"
 import {lowerCaseFirst, Output, unsupportedCase} from "@subsquid/openreader/dist/util"
 import assert from "assert"
@@ -7,7 +7,7 @@ import {OutDir} from "./utils/outDir"
 
 function generateOrmModels(model: Model, dir: OutDir): void {
     let variants = collectVariants(model)
-    let index = dir.file('model/index.ts')
+    let index = dir.file('model.ts')
     let usesMarshaling = false
 
     for (let name in model) {
@@ -20,6 +20,12 @@ function generateOrmModels(model: Model, dir: OutDir): void {
                 generateObject(name, item)
                 usesMarshaling = true
                 break
+            case 'union':
+                generateUnion(name, item)
+                break
+            case 'enum':
+                generateEnum(name, item)
+                break
         }
     }
 
@@ -29,7 +35,7 @@ function generateOrmModels(model: Model, dir: OutDir): void {
     }
 
     function generateEntity(name: string, entity: Entity): void {
-        index.line(`export * from "./${lowerCaseFirst(name)}.model"`)
+        index.line(`export * from "./model/${lowerCaseFirst(name)}.model"`)
         let out = dir.file(`model/${lowerCaseFirst(name)}.model.ts`)
         let imports = new ImportRegistry()
         imports.useTypeorm('Entity', 'Column', 'PrimaryColumn')
@@ -54,22 +60,22 @@ function generateOrmModels(model: Model, dir: OutDir): void {
                                 out.line('@PrimaryColumn_()')
                                 break
                             case 'String':
-                                out.line('@Column_("text")')
+                                out.line(`@Column_("text", {nullable: ${prop.nullable}})`)
                                 break
                             case 'Int':
-                                out.line('@Column_("integer")')
+                                out.line(`@Column_("integer", {nullable: ${prop.nullable}})`)
                                 break
                             case 'Boolean':
-                                out.line('@Column_("bool")')
+                                out.line(`@Column_("bool", {nullable: ${prop.nullable}})`)
                                 break
                             case 'DateTime':
-                                out.line('@Column_("timestamp with time zone")')
+                                out.line(`@Column_("timestamp with time zone", {nullable: ${prop.nullable}})`)
                                 break
                             case 'BigInt':
-                                out.line('@Column_("numeric")')
+                                out.line(`@Column_("numeric", {nullable: ${prop.nullable}})`)
                                 break
                             case 'Bytes':
-                                out.line('@Column_("bytea")')
+                                out.line(`@Column_("bytea", {nullable: ${prop.nullable}})`)
                                 break
                             default:
                                 throw unsupportedCase(prop.type.name)
@@ -77,13 +83,13 @@ function generateOrmModels(model: Model, dir: OutDir): void {
                         break
                     case 'enum':
                         imports.useModel(prop.type.name)
-                        out.line(`@Column_("varchar", {length: ${getEnumMaxLength(model, prop.type.name)}})`)
+                        out.line(`@Column_("varchar", {length: ${getEnumMaxLength(model, prop.type.name)}, nullable: ${prop.nullable}})`)
                         break
                     case 'fk':
                         imports.useTypeorm('ManyToOne', 'Index')
                         imports.useModel(prop.type.foreignEntity)
                         out.line('@Index_()')
-                        out.line(`@ManyToOne_(() => ${prop.type.foreignEntity})`)
+                        out.line(`@ManyToOne_(() => ${prop.type.foreignEntity}, {nullable: ${prop.nullable}})`)
                         break
                     case 'list-relation':
                         imports.useTypeorm('OneToMany')
@@ -92,19 +98,23 @@ function generateOrmModels(model: Model, dir: OutDir): void {
                         break
                     case 'object':
                         imports.useModel(prop.type.name)
-                        out.line(`@Column_("jsonb", {transform: {to: obj => obj.toJSON(), from: json => new ${prop.type.name}(json)}})`)
+                        out.line(`@Column_("jsonb", {transformer: {to: obj => obj${prop.nullable ? '?' : ''}.toJSON(), from: json => ${prop.nullable ? 'json == null ? undefined : ' : ''}new ${prop.type.name}(json)}, nullable: ${prop.nullable}})`)
+                        break
+                    case 'union':
+                        imports.useModel(prop.type.name)
+                        out.line(`@Column_("jsonb", {transformer: {to: obj => obj${prop.nullable ? '?' : ''}.toJSON(), from: ${prop.nullable ? `json => json == null ? undefined : fromJson${prop.type.name}(json)` : `fromJson${prop.type.name}`}}, nullable: ${prop.nullable}})`)
                         break
                     default:
                         throw unsupportedCase(prop.type.kind)
                 }
-                out.line(`${key}: ${getPropJsType('entity', prop)}`)
+                out.line(`${key}!: ${getPropJsType('entity', prop)}`)
             }
         })
         out.write()
     }
 
     function generateObject(name: string, object: JsonObject): void {
-        index.line(`export * from "./${lowerCaseFirst(name)}"`)
+        index.line(`export * from "./model/${lowerCaseFirst(name)}"`)
         let out = dir.file(`model/${lowerCaseFirst(name)}.ts`)
         let imports = new ImportRegistry()
         imports.useMarshal()
@@ -113,6 +123,9 @@ function generateOrmModels(model: Model, dir: OutDir): void {
         out.line()
         printComment(object, out)
         out.block(`export class ${name}`, () => {
+            if (variants.has(name)) {
+                out.line(`public readonly isTypeOf = '${name}'`)
+            }
             for (let key in object.properties) {
                 out.line(`private _${key}!: ${getPropJsType('object', object.properties[key])}`)
             }
@@ -143,6 +156,9 @@ function generateOrmModels(model: Model, dir: OutDir): void {
             out.line()
             out.block(`toJSON(): object`, () => {
                 out.block('return', () => {
+                    if (variants.has(name)) {
+                        out.line('isTypeOf: this.isTypeOf,')
+                    }
                     for (let key in object.properties) {
                         let prop = object.properties[key]
                         out.line(`${key}: ${marshalToJson(prop, 'this.' + key)},`)
@@ -211,6 +227,37 @@ function generateOrmModels(model: Model, dir: OutDir): void {
             }
             return convert
         }
+    }
+
+    function generateUnion(name: string, union: Union): void {
+        index.line(`export * from "./model/${lowerCaseFirst(name)}"`)
+        let out = dir.file(`model/${lowerCaseFirst(name)}.ts`)
+        let imports = new ImportRegistry()
+        out.lazy(() => imports.render(model))
+        union.variants.forEach(v => imports.useModel(v))
+        out.line()
+        out.line(`export type ${name} = ${union.variants.join(' | ')}`)
+        out.line()
+        out.block(`export function fromJson${name}(json: any): ${name}`, () => {
+            out.block(`switch(json?.isTypeOf)`, () => {
+                union.variants.forEach(v => {
+                    out.line(`case '${v}': return new ${v}(json)`)
+                })
+                out.line(`default: throw new TypeError('Unknown json object passed as ${name}')`)
+            })
+        })
+        out.write()
+    }
+
+    function generateEnum(name: string, e: Enum): void {
+        index.line(`export * from "./model/${lowerCaseFirst(name)}"`)
+        let out = dir.file(`model/${lowerCaseFirst(name)}.ts`)
+        out.block(`export enum ${name}`, () => {
+            for (let val in e.values) {
+                out.line(`${val} = "${val}",`)
+            }
+        })
+        out.write()
     }
 }
 
@@ -345,7 +392,11 @@ class ImportRegistry {
                     imports.push(`import {${name}} from "./${lowerCaseFirst(name)}.model"`)
                     break
                 default:
-                    imports.push(`import {${name}} from "./${lowerCaseFirst(name)}"`)
+                    let names = [name]
+                    if (model[name].kind == 'union') {
+                        names.push('fromJson' + name)
+                    }
+                    imports.push(`import {${names.join(', ')}} from "./${lowerCaseFirst(name)}"`)
             }
         }
         return imports
