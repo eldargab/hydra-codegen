@@ -409,6 +409,8 @@ function main() {
     let dir = new OutDir('src/generated')
     dir.del()
     dir.addResource('ormconfig.ts')
+    dir.addResource('server.ts')
+    dir.addResource('type-graphql.ts')
     generateOrmModels(model, dir)
 }
 
